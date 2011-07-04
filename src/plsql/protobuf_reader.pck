@@ -1,11 +1,12 @@
 CREATE OR REPLACE PACKAGE protobuf_reader IS
 
    -- Author  : SCHMIED.JUERGEN
-   -- Last Update : 10.02.2011
+   -- Created : 18.01.2011 19:26:07
+   -- Purpose : 
 
    /*
    
-   Example:
+   Beispiel:
         
          message myMessage { 
            required int32 firstID = 1;
@@ -40,7 +41,7 @@ CREATE OR REPLACE PACKAGE protobuf_reader IS
          
          Every read moves the current position inside the buffer, so the fields must be read 
          sequentiell or you have to call protobuf_reader.init_buffer again or work with a copy
-         of t_buffer. If a filed is not found, the position is not moved.
+         of t_buffer.
          
          The same applies to protobuf_reader.sub_structure_offset so you must give a index of 1 
          to read the next structure.
@@ -65,9 +66,11 @@ END protobuf_reader;
 /
 CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
 
-   c_zero_mask      RAW(1) := hextoraw('00');
-   c_end_flag_mask  RAW(1) := hextoraw('80');
-   c_used_bits_mask RAW(1) := hextoraw('7f');
+   c_zero_mask         RAW(1) := hextoraw('00');
+   c_end_flag_mask     RAW(1) := hextoraw('80');
+   c_used_bits_mask    RAW(1) := hextoraw('7f');
+   c_overflow_mask     RAW(1) := hextoraw('70');
+   c_lower_4_bits_mask RAW(1) := hextoraw('0f');
 
    c_shift_7  BINARY_INTEGER := 128;
    c_shift_14 BINARY_INTEGER := 128 * 128;
@@ -92,42 +95,39 @@ CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
    END;
 
    /**
-   * Read a raw Varint from the stream.  If larger than 32 bits, discard the
-   * upper bits.
+   * Read a raw Varint from the stream.  If larger than 32 bits, throws a exception
    */
    FUNCTION readrawvarint32(p_buffer IN OUT t_buffer) RETURN BINARY_INTEGER IS
-      v_byte              RAW(1);
-      v_len               PLS_INTEGER := 1;
-      v_result            BINARY_INTEGER;
-      c_overflow_mask     RAW(1) := hextoraw('70');
-      c_lower_4_bits_mask RAW(1) := hextoraw('0f');
+      v_byte   RAW(1);
+      v_len    PLS_INTEGER := 1;
+      v_result BINARY_INTEGER;
    BEGIN
-      dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+      dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
       p_buffer.current_offset := p_buffer.current_offset + v_len;
    
       v_result := utl_raw.cast_to_binary_integer(utl_raw.bit_and(v_byte, c_used_bits_mask));
    
       IF utl_raw.bit_and(v_byte, c_end_flag_mask) = c_end_flag_mask THEN
       
-         dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+         dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
          p_buffer.current_offset := p_buffer.current_offset + v_len;
          v_result                := v_result + utl_raw.cast_to_binary_integer(utl_raw.bit_and(v_byte, c_used_bits_mask)) * c_shift_7;
       
          IF utl_raw.bit_and(v_byte, c_end_flag_mask) = c_end_flag_mask THEN
          
-            dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+            dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
             p_buffer.current_offset := p_buffer.current_offset + v_len;
             v_result                := v_result + utl_raw.cast_to_binary_integer(utl_raw.bit_and(v_byte, c_used_bits_mask)) * c_shift_14;
          
             IF utl_raw.bit_and(v_byte, c_end_flag_mask) = c_end_flag_mask THEN
             
-               dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+               dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
                p_buffer.current_offset := p_buffer.current_offset + v_len;
                v_result                := v_result + utl_raw.cast_to_binary_integer(utl_raw.bit_and(v_byte, c_used_bits_mask)) * c_shift_21;
             
                IF utl_raw.bit_and(v_byte, c_end_flag_mask) = c_end_flag_mask THEN
                
-                  dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+                  dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
                   p_buffer.current_offset := p_buffer.current_offset + v_len;
                
                   IF utl_raw.bit_and(v_byte, c_overflow_mask) != c_zero_mask THEN
@@ -155,7 +155,7 @@ CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
       v_shift  INTEGER := 1;
    BEGIN
       FOR i IN 1 .. 10 LOOP
-         dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+         dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
          p_buffer.current_offset := p_buffer.current_offset + v_len;
          v_result                := v_result + utl_raw.cast_to_binary_integer(utl_raw.bit_and(v_byte, c_used_bits_mask)) * v_shift;
       
@@ -174,7 +174,7 @@ CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
       v_len  PLS_INTEGER := 1;
    BEGIN
       FOR i IN 1 .. 10 LOOP
-         dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
+         dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_byte);
          p_buffer.current_offset := p_buffer.current_offset + v_len;
       
          IF utl_raw.bit_and(v_byte, c_end_flag_mask) != c_end_flag_mask THEN
@@ -190,7 +190,9 @@ CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
       v_buffer RAW(256);
    BEGIN
       v_len := readrawvarint32(p_buffer);
-      dbms_lob.READ(p_buffer.buffer, v_len, p_buffer.current_offset, v_buffer);
+      IF v_len > 0 THEN
+         dbms_lob.read(p_buffer.buffer, v_len, p_buffer.current_offset, v_buffer);
+      END IF;
       p_buffer.current_offset := p_buffer.current_offset + v_len;
       RETURN utl_i18n.raw_to_char(v_buffer, 'utf8');
    END;
@@ -213,12 +215,11 @@ CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
    END;
 
    FUNCTION sub_structure_offset(p_buffer IN OUT t_buffer, p_field_number IN PLS_INTEGER, p_index IN PLS_INTEGER := 1) RETURN t_buffer IS
-      v_current_int  INTEGER;
-      v_data_type    PLS_INTEGER;
-      v_field_nr     PLS_INTEGER;
-      v_index        PLS_INTEGER := 1;
-      v_sub_buffer   t_buffer;
-      v_old_position PLS_INTEGER := p_buffer.current_offset;
+      v_current_int INTEGER;
+      v_data_type   PLS_INTEGER;
+      v_field_nr    PLS_INTEGER;
+      v_index       PLS_INTEGER := 1;
+      v_sub_buffer  t_buffer;
    BEGIN
       WHILE p_buffer.current_offset < p_buffer.end_offset LOOP
          v_current_int := protobuf_reader.readrawvarint32(p_buffer);
@@ -246,7 +247,6 @@ CREATE OR REPLACE PACKAGE BODY protobuf_reader IS
          skip_field(p_buffer, v_data_type);
       END LOOP;
    
-      p_buffer.current_offset := v_old_position;
       RETURN NULL;
    END;
 
